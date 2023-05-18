@@ -1,0 +1,44 @@
+---
+- name: bind to domain
+  hosts: "{{ hostname }}"
+  tasks:
+
+    - name: Fetch pexpect
+      ansible.builtin.fetch:
+        src: "/ansible_files/centos_packages/pexpect-4.8.0-py2.py3-none-any.whl"
+        dest: ./pexpect-4.8.0-py2.py3-none-any.whl
+        remote_src: yes
+        flat: yes
+        become: yes
+      delegate_to: devhansiblefs01.devlab.mgam
+
+    - name: Fetch pexpect
+      ansible.builtin.fetch:
+        src: "/ansible_files/centos_packages/ptyprocess-0.7.0-py2.py3-none-any.whl"
+        dest: ./ptyprocess-0.7.0-py2.py3-none-any.whl
+        remote_src: yes
+        flat: yes
+      delegate_to: devhansiblefs01.devlab.mgam
+
+    - name: Copy pexpect
+      ansible.builtin.copy:
+        src: ./pexpect-4.8.0-py2.py3-none-any.whl
+        dest: /tmp/pexpect-4.8.0-py2.py3-none-any.whl
+
+    - name: Copy pexpect
+      ansible.builtin.copy:
+        src: ./ptyprocess-0.7.0-py2.py3-none-any.whl
+        dest: /tmp/ptyprocess-0.7.0-py2.py3-none-any.whl
+
+    - name: Install pexpect
+      command: "pip3 install /tmp/ptyprocess-0.7.0-py2.py3-none-any.whl"    
+
+    - name: Install pexpect
+      command: "pip3 install /tmp/pexpect-4.8.0-py2.py3-none-any.whl"  
+
+    - name: Join server to AD
+      expect:
+        command: "sudo realm join {{ domain }} -U {{ bind_username }}"
+        responses:
+          Password for *: "{{ bind_password }}"
+      no_log: true

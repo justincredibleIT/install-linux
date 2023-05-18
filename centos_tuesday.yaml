@@ -1,0 +1,214 @@
+---
+- name: Extract CentOS ISO, add kickstart file, and create new ISO
+  hosts: all
+  gather_facts: false
+  vars:
+    #iso_file_path: "/ansible_files/CentOS-7-x86_64-Minimal-2009.iso"
+    iso_file_path: "/ansible_files/CentOS-7-x86_64-DVD-2207-02.iso"
+    extracted_dir: "/tmp/iso"
+    ks_file_path: "/tmp/ks.cfg"
+    new_iso_file_path: "/tmp/new_iso/CentOS-7-x86_64-Minimal-2009.iso"
+    root_password: "Password#1"
+    iso_name: CentOS-7-x86_64-Minimal-2009.iso
+    vmfolder: /System-Engineering/Justin/
+    memory: "{{ (memory_gb*1024) }}"
+    my_lines:
+      - "label kickstart"
+      - "menu label ^Kickstart CentOS 7"
+      - "menu default"
+      - "kernel vmlinuz"
+      - "append initrd=initrd.img inst.stage2=hd:LABEL=CentOS\\x207\\x20x86_64 inst.ks=cdrom:/ks.cfg"
+
+  tasks:
+
+    - name: Set the state of a virtual machine to poweroff
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vcenterserver }}"
+        folder: "{{ vmfolder }}"
+        name: "{{ hostname }}"
+        state: powered-off
+      delegate_to: localhost
+      ignore_errors: yes
+
+    - name: Remove a virtual machine from inventory
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenterserver }}"
+        name: "{{ hostname }}"
+        delete_from_inventory: true
+        state: absent
+      delegate_to: localhost
+      ignore_errors: 
+
+    - name: Delete iso
+      community.vmware.vsphere_file:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        datastore: "{{ ds_name }}"
+        path: "/{{ iso_name }}"
+        username: "{{ vuser }}"
+        password: "{{ vpass }}"
+        state: absent
+      delegate_to: localhost
+      ignore_errors: yes      
+
+
+
+    - name: Create Kickstart file
+      copy:
+        content: |
+          # Kickstart file for CentOS 7
+          install
+          cdrom
+          text
+          firewall --disabled
+          network --bootproto=static --ip={{ ip_address }} --netmask={{ netmask }} --gateway={{ gateway }} --nameserver={{ dns_server }} --hostname={{ hostname }}.{{ domain }}
+          rootpw --iscrypted $1$NVgOTO5C$U/8su5Ct0PkpsZm0BhHKa.
+          auth --enableshadow --passalgo=sha512
+          timezone --utc America/New_York
+          bootloader --location=mbr --boot-drive=sda
+          clearpart --all --initlabel
+          autopart --type=plain --fstype=ext4
+          reboot
+          %packages
+          @^minimal
+          @core
+          @Development Tools
+          openssh-clients
+          yum-utils
+          krb5-server
+          krb5-libs 
+          krb5-workstation 
+          realmd
+          oddjob 
+          oddjob-mkhomedir 
+          sssd
+          samba-common-tools
+          adcli
+          openssl-devel
+          bzip2-devel
+          libffi-devel
+          xz-devel
+          chrony
+          python3
+          python3-pip
+          pexpect
+          %end
+          %post
+          yum update -y
+          yum install -y sudo
+          yum clean all
+          %end
+        dest: "{{ ks_file_path }}"
+
+
+    - name: Extract CentOS ISO with bsdtar
+      command: "bsdtar -xf /tmp/CentOS-7-x86_64-Minimal-2009.iso -C {{ extracted_dir }}"
+      become: true
+
+    - name: Add kickstart file to extracted ISO
+      copy:
+        src: "{{ ks_file_path }}"
+        #dest: "{{ extracted_dir }}/isolinux/ks.cfg"
+        dest: "{{ extracted_dir }}/ks.cfg"        
+        mode: 0644
+        remote_src: true
+      become: true
+
+    - name: Remove Test media as default
+      ansible.builtin.lineinfile:
+        path: "{{ extracted_dir }}/isolinux/isolinux.cfg"
+        state: absent
+        regexp: "menu default"
+
+    - name: Append lines to file
+      lineinfile:
+        path: "{{ extracted_dir }}/isolinux/isolinux.cfg"
+        line: "{{ item }}"
+        create: yes
+      loop: "{{ my_lines }}"
+
+    - name: Create new ISO with modified files
+      command: mkisofs -o "{{ new_iso_file_path }}" -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -R -J -V "CentOS 7 x86_64" "{{ extracted_dir }}"
+      become: true
+
+    - name: Import checksum
+      command: implantisomd5 "{{ new_iso_file_path }}"
+      become: true
+
+    - name: Fetch new iso
+      ansible.builtin.fetch:
+        src: "{{ new_iso_file_path }}"
+        dest: "{{ new_iso_file_path }}"
+        #remote_src: yes
+        flat: yes
+
+    # Upload and install new ISO to vSphere
+    - name: Upload the custom centos ISO to the vSphere datastore
+      community.vmware.vsphere_copy:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        src: "{{ new_iso_file_path }}"
+        datastore: "{{ ds_name }}"
+        path: "/{{ iso_name }}"
+        #remote_src: yes
+      delegate_to: localhost
+
+    - name: Deploy centos VM
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        name: "{{ hostname }}"
+        state: poweredon
+        guest_id: centos64Guest 
+        cluster: "{{ vspherecluster }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ vmfolder }}"
+        disk:
+          - size_gb: "{{ hard_disk }}"
+            type: thick
+            #autoselect_datastore: true
+            datastore: "{{ ds_name }}"
+        hardware:
+          memory_mb: "{{ memory_gb * 1024 }}"
+          num_cpus: "{{ cpus }}"
+          num_cpu_cores_per_socket: "{{ cores }}"
+          scsi: lsilogic
+        networks:
+        - name: "{{ network_name }}"      
+          device_type: vmxnet3
+        cdrom:
+          - controller_number: 0
+            unit_number: 0
+            type: iso
+            iso_path: "[{{ ds_name }}]/{{ iso_name }}"
+            state: present
+        annotation: |
+                    *** Auto-Deployed by Ansible ***    
+      delegate_to: localhost
+
+    - name: Start checking if the centos VM is ready
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenterserver }}"
+        datacenter: "{{ datacenter }}"
+        validate_certs: false
+        name: "{{ hostname }}"
+        schema: vsphere
+      register: vm_facts
+      until: vm_facts.instance.guest.hostName is search(hostname)
+      retries: 30
+      delay: 60
+      delegate_to: localhost
+
+
+#    - name: Install new ISO                    
+#      community.vmware.vmware_guest:
+#        vcenter_hostname: "{{ vcenterserver }}"
+#        guest_id: "{{ guest_id }}"
+#        vm_id: "{{ vm_id }}"
+#        vm_username: "{{ vm_username }}"
+#        vm_password: "{{ vm_password }}"
+#        state: poweredon
+#        vm_extra_config:
+#          cdrom: "[{{ datastore }}] {{ new_iso_file }}"

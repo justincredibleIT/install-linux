@@ -1,0 +1,41 @@
+---
+- name: Get datastore info
+  hosts: all
+  tasks:
+
+  - name: Gather info from datacenter about specific datastore
+    community.vmware.vmware_datastore_info:
+      datacenter_name: '{{ datacenter_name }}'
+      schema: vsphere
+      properties:
+        - name
+        - overallStatus  
+    delegate_to: localhost
+    register: info
+
+  - name: Set fact01
+    ansible.builtin.set_fact:
+      green: green
+
+  - name: Set fact02
+    ansible.builtin.set_fact:
+      datastore: "{{ item }}"
+    when: 
+      - item is search('green')
+      - item is search('DEVPURE0')
+    loop: "{{ info.datastores }}"
+
+  - name: set fact03
+    ansible.builtin.set_fact:
+      ds_name: "{{ datastore.name }}"
+
+  - debug:
+      msg: "{{ datastore.name }}"
+
+  - name: set stats to pass between playbooks
+    set_stats:
+      data:
+        ds_name: "{{ ds_name }}"
+
+  - debug:
+      msg: "{{ ds_name }}"
