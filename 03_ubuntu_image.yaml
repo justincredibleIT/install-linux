@@ -1,0 +1,527 @@
+---
+- hosts: localhost
+  name: Install Ubuntu
+  gather_facts: false
+  
+  vars:
+    workingdir: "{{ lookup('env','HOME') }}/ubuntu-autoinstall"   # Temp directory on the Ansible Controller
+    #ubuntuiso: ubuntu-22.04-live-server-amd64.iso               # Ubuntu ISO filename
+    ubuntuiso: ubuntu-22.04-live-server-amd64.iso
+    #ubuntuiso_url: http://old-releases.ubuntu.com/releases/22.04/ # Ubuntu ISO URL
+    ubuntunewiso: ubuntu-22.04-live-server-amd64.iso
+    #ubuntunewiso: ubuntu-22.04-live-server-amd64.iso              # Ubuntu custom ISO name
+    vmfolder: /System-Engineering/Justin/                                                   # vCenter VM folder
+    vmisos: 
+    #datastore: "DEVLAB-HUS1-V0002"                                # vSphere datastore    
+    ubuntuoslocale: en_US                                         # Ubuntu OS locale
+    ubuntuoskeyboardlayout: en                                    # Ubuntu OS keyboard layout
+    ubuntuoskeyboardvariant: us                                   # Ubuntu OS keyboard variant
+    vm_password: $6$gJpG/rEDfloVM15b$rfiawOB.p6DofK8DHzSWndL8VvIdj1O5EJFM0DhcDt1rZtq1mz8pNXORpgVvM.kgVOyXucqP9D8cjhibbdxhf0
+    ubuntuosuser: "{{vm_username}}"
+    ubuntuospassword: "{{vm_password}}"
+    
+    #ubuntuosuser: ubuntu-user                                         # Ubuntu OS username
+    #ubuntuospassword: Password#1                                    # Ubuntu OS password
+
+  tasks:
+
+###################################################################
+
+    - name: Delete working directory on Ansible Controller
+      ansible.builtin.file:
+        path: "{{ workingdir }}"
+        state: absent
+
+    - name: Create working directory on Ansible Controller
+      ansible.builtin.file:
+        path: "{{ workingdir }}"
+        state: directory
+        mode: "755"
+      delegate_to: localhost
+
+#    - name: create dir
+#      ansible.builtin.command:
+#        cmd: "mkdir ubuntu-autoinstall" 
+
+    - name: Fetch iso
+      ansible.builtin.fetch:
+        src: "/ansible_files/ubuntu-22.04-live-server-amd64.iso"
+        dest: "{{ workingdir }}/{{ ubuntuiso }}"
+        #dest: "{{ workingdir }}/{{ ubuntuiso }}"
+        remote_src: yes
+        become: yes
+        mode: "755"
+        flat: yes
+      delegate_to: devhansiblefs01.devlab.mgam
+
+
+##    - name: cp iso
+##      ansible.builtin.command:
+##        cmd: "cp ../ubuntu-22.04-live-server-amd64.iso ./" 
+
+#    - name: cd
+#      ansible.builtin.command:
+#        cmd: "cd " 
+
+    - name: copy autoinstall user data
+      ansible.builtin.command:
+        cmd: "cp ../autoinstall-user-data ./"
+ 
+    - name: Check if ubuntu ISO exists locally on Ansible Controller
+      ansible.builtin.stat:
+        path: "{{ workingdir }}/{{ ubuntuiso }}"
+      register: installerfilecheck
+ 
+    - name: copy iso
+      ansible.builtin.copy:
+        src: "./{{ ubuntuiso }}"
+        dest: "{{ workingdir }}/{{ ubuntuiso }}"
+        mode: "755"
+      when:
+        - not installerfilecheck.stat.exists 
+
+    - name: list up
+      ansible.builtin.command:
+        cmd: "ls {{ workingdir }}"
+      register: up
+
+    - debug:
+        msg: "{{ up }}"
+ 
+    - name: Extract Ubuntu ISO
+      ansible.builtin.command: "xorriso -osirrox on -indev {{ workingdir }}/{{ ubuntuiso }} \
+                               -extract / {{ workingdir }}/iso"
+      changed_when: false 
+ 
+    - name: Add write permission to extracted files
+      ansible.builtin.command: "chmod -R +w {{ workingdir }}/iso"    # Using chmod as Ansible (Python) can't handle the recursion depth on the Ubuntu ISO
+      changed_when: false 
+ 
+## Start workaround issue with Ubuntu autoinstall
+## Details of the issue and the workaround: https://askubuntu.com/questions/1394441/ubuntu-20-04-3-autoinstall-with-embedded-user-data-crashing-i-got-workaround
+
+
+ 
+    - name: Extract the Packages.gz file on Ubuntu ISO
+      ansible.builtin.command: "gunzip -f {{ workingdir }}/iso/dists/jammy/main/binary-amd64/Packages.gz --keep"
+      changed_when: false
+
+    - name: Create directory to store user-data and meta-data
+      ansible.builtin.file:
+        path: "{{ workingdir }}/isocopy/boot/grub"
+        state: directory
+        mode: "755"
+
+    - name: Copy txt.cfg from ubuntu ISO
+      ansible.builtin.copy:
+        src: "{{ workingdir }}/iso/boot/grub/grub.cfg"
+        dest: "{{ workingdir }}/isocopy/boot/grub/grub.cfg"
+        mode: "775"
+
+    - name: Edit grub.cfg to modify append line
+      ansible.builtin.replace:
+        path: "{{ workingdir }}/isocopy/boot/grub/grub.cfg"
+        regexp: '\tlinux\t/casper/vmlinuz  ---'       
+        replace: 'linux   /casper/vmlinuz quiet autoinstall ds=nocloud\;s=/cdrom/autoinstall/  ---' 
+
+    - name: Replace Grub prompt
+      ansible.builtin.replace:
+        path: "{{ workingdir }}/isocopy/boot/grub/grub.cfg"
+        regexp: 'Try or Install Ubuntu Server'     
+        replace: 'Autoinstall Ubuntu Server'
+ 
+    - name: Create directory to store user-data and meta-data
+      ansible.builtin.file:
+        path: "{{ workingdir }}/isocopy/autoinstall"
+        state: directory
+        mode: "755"
+
+    - name: Copy user-data file to directory
+      ansible.builtin.copy:
+        src: "/runner/autoinstall-user-data"
+        dest: "{{ workingdir }}/isocopy/autoinstall/user-data"
+        mode: "755"
+
+    - name: Edit Grub sudoers
+      ansible.builtin.replace:
+        path: "{{ workingdir }}/isocopy/autoinstall/user-data"
+        regexp: 'ubuntuossearchdomain'     
+        replace: "{{ ubuntuossearchdomain }}"
+
+    - name: Edit Grub sudoers
+      ansible.builtin.replace:
+        path: "{{ workingdir }}/isocopy/autoinstall/user-data"
+        regexp: 'adgroup'     
+        replace: "{{ adgroup }}"
+
+    - name: Edit netplan
+      ansible.builtin.replace:
+        path: "/runner/Ubuntu_Netplan.j2"
+        regexp: 'ipv4address'       
+        replace: "{{ ubuntuosipv4address }}"
+
+    - name: Edit netplan
+      ansible.builtin.replace:
+        path: "/runner/Ubuntu_Netplan.j2"        
+        regexp: 'ipv4gateway'
+        replace: "{{ ubuntuosipv4gateway }}"
+        
+    - name: Edit netplan
+      ansible.builtin.replace:
+        path: "/runner/Ubuntu_Netplan.j2"        
+        regexp: 'dnsserver'
+        replace: "{{ ubuntuosipv4dns }}"
+
+    - name: Edit netplan
+      ansible.builtin.replace:
+        path: "/runner/Ubuntu_Netplan.j2"        
+        regexp: 'domainsearch'
+        replace: "{{ ubuntuossearchdomain }}"
+
+    - name: Copy netplan j2
+      ansible.builtin.copy:
+        src: "/runner/Ubuntu_Netplan.j2"
+        dest: "{{ workingdir }}/00-installer-config.yaml"
+        mode: "755" 
+
+    - name: Edit other txt to modify append line
+      ansible.builtin.replace:
+        path: "{{ workingdir }}/isocopy/autoinstall/user-data"
+        regexp: 'hostname123'     
+        replace: "{{ ubuntuvmname }}"
+ 
+    - name: Create empty meta-data file in directory
+      ansible.builtin.file:
+        path: "{{ workingdir }}/isocopy/autoinstall/meta-data"
+        state: touch
+        mode: "755"
+
+    - name: Create custom ubuntu ISO
+      ansible.builtin.command: "xorrisofs -relaxed-filenames -J -R -o {{ workingdir }}/{{ ubuntunewiso }} \
+                               -b /boot/grub/i386-pc/eltorito.img -c /boot.catalog -no-emul-boot -boot-load-size 4 -boot-info-table \
+                               {{ workingdir }}/iso/ {{ workingdir }}/isocopy/"
+      args:
+        chdir: "{{ workingdir }}/isocopy/"
+      changed_when: false
+ 
+    - name: Upload the custom ubuntu ISO to the vSphere datastore
+      community.vmware.vsphere_copy:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        src: "{{ workingdir }}/{{ ubuntunewiso }}"
+        datastore: "{{ ds_name }}"
+        path: "/{{ ubuntunewiso }}"
+ 
+    - name: Deploy ubuntu VM
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        name: "{{ ubuntuvmname }}"
+        state: poweredon
+        guest_id: ubuntu64Guest
+        cluster: "{{ vspherecluster }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ vmfolder }}"
+        disk:
+          - size_gb: "{{ ubuntuvmdisksize }}"
+            type: thick
+            #autoselect_datastore: true
+            datastore: "{{ ds_name }}"
+        hardware:
+          memory_mb: "{{ ubuntuvmmemorysize }}"
+          num_cpus: "{{ ubuntuvvmcpus }}"
+          num_cpu_cores_per_socket: "{{ ubuntuvmcpucores }}"
+          scsi: lsilogic
+        networks:
+        - name: "{{ ubuntuvmportgroup }}"      
+          device_type: vmxnet3
+        cdrom:
+          - controller_number: 0
+            unit_number: 0
+            type: iso
+            #iso_path: "[ datastore ] /{{ ubuntunewiso }}"
+            iso_path: "[{{ ds_name }}]/{{ ubuntunewiso }}"
+            state: present
+        annotation: |
+                    *** Auto-Deployed by Ansible ***
+ 
+    - name: Start checking if the ubuntu VM is ready
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenterserver }}"
+        datacenter: "{{ datacenter }}"
+        validate_certs: false
+        name: "{{ ubuntuvmname }}"
+        schema: vsphere
+      register: vm_facts
+      until: vm_facts.instance.guest.hostName is search(ubuntuvmname)
+      retries: 30
+      delay: 60 
+
+    - name: Copy network configuration file to ubuntu VM
+      community.vmware.vmware_guest_file_operation:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        copy:
+          src: "{{ workingdir }}/00-installer-config.yaml"
+          dest: "/home/{{ ubuntuosuser }}/00-installer-config.yaml"
+
+    - name: Copy debs
+      community.vmware.vmware_guest_file_operation:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        copy:
+          src: "../packages.zip"
+          dest: "/home/{{ ubuntuosuser }}/packages.zip"
+
+    - name: Copy debs
+      community.vmware.vmware_guest_file_operation:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        copy:
+          src: "../unzip_6.0-26ubuntu3_amd64.deb"
+          dest: "/home/{{ ubuntuosuser }}/unzip_6.0-26ubuntu3_amd64.deb"
+
+    - name: Copy debs
+      community.vmware.vmware_guest_file_operation:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        copy:
+          src: "../python3-magic_2%253a0.4.24-2_all.deb"
+          dest: "/home/{{ ubuntuosuser }}/python3-magic_2%253a0.4.24-2_all.deb"
+
+    - name: Copy debs
+      community.vmware.vmware_guest_file_operation:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        copy:
+          src: "../apt-offline_1.8.4-1_all.deb"
+          dest: "/home/{{ ubuntuosuser }}/apt-offline_1.8.4-1_all.deb"
+ 
+    - name: Move network configuration file to right location on ubuntu VM
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "mv /home/{{ ubuntuosuser }}/00-installer-config.yaml /etc/netplan/00-installer-config.yaml"
+ 
+ 
+    - name: Apply the network configuration on ubuntu VM
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: netplan apply
+
+    - name: Install unzip
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "dpkg -i /home/{{ubuntuosuser}}/unzip_6.0-26ubuntu3_amd64.deb"
+
+    - name: Install python3-magic
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "dpkg -i /home/{{ubuntuosuser}}/python3-magic_2%253a0.4.24-2_all.deb"
+
+    - name: Install apt-offline
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "dpkg -i /home/{{ubuntuosuser}}/apt-offline_1.8.4-1_all.deb"
+
+    - name: unzip packages
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "unzip /home/{{ubuntuosuser}}/packages.zip"
+
+    - name: Install apt-get-update
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/apt-offline.zip"
+
+    - name: Install adcli apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/adcli.zip"
+
+    - name: Install adcli 
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install adcli -y"
+
+    - name: Install libnss-sss apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/libnss-sss.zip"    
+
+    - name: Install libnss-sss
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install libnss-sss -y"                        
+
+    - name: Install libpam-sss apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/libpam-sss.zip" 
+
+    - name: Install libpam-sss
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install libpam-sss -y" 
+
+    - name: Install realmd apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/realmd.zip"  
+
+    - name: Install realmd
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install realmd -y"  
+
+    - name: Install sssd-tools apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/sssd-tools.zip" 
+
+    - name: Install sssd-tools
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install sssd-tools -y" 
+
+    - name: Install sssd apt data
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-offline install /home/{{ubuntuosuser}}/packages/sssd.zip"
+
+    - name: Install sssd
+      community.vmware.vmware_vm_shell:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        vm_id: "{{ ubuntuvmname }}"
+        vm_username: "{{ vm_username }}"
+        vm_password: "{{ vm_password }}"
+        vm_shell: /usr/bin/sudo
+        vm_shell_args: "apt-get install sssd -y"
+ 
+    - name: Delete working directory on Ansible Controller
+      ansible.builtin.file:
+        path: "{{ workingdir }}"
+        state: absent
+
+    - name: Delete iso
+      community.vmware.vsphere_file:
+        hostname: "{{ vcenterserver }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        datastore: "{{ ds_name }}"
+        path: "/{{ ubuntunewiso }}"
+        username: "{{ vuser }}"
+        password: "{{ vpass }}"
+        state: absent
+
+#    - name: Join server to AD
+#      expect:
+#        command: /bin/bash -c "sudo realm join {{ ubuntuossearchdomain }} -U {{ bind_username }}"
+#        responses:
+#          Password for *: "{{ bind_password }}"
